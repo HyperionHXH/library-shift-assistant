@@ -1,0 +1,22 @@
+# Executables & PyInstaller build artifacts
+*.exe
+*.spec
+build/
+dist/
+
+# Personal runtime state, custom rules & optional API keys
+schedule_state.json
+parser_rules.json
+
+# Real personal schedules (keep only anonymized 示例排班表.xlsx tracked)
+11月16日-11月22日排班表.xlsx
+*_最新排班*.xlsx
+~$*.xlsx
+
+# Python & IDE caches
+__pycache__/
+*.py[cod]
+*.log
+*.bak
+.vscode/
+.idea/

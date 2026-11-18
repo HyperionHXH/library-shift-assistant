@@ -1,0 +1,91 @@
+# 📚 图书馆助理排班与微信群自动替班助手
+
+面向 Windows PC 端微信（同时兼容微信 **3.x** 与 **4.0**）的图书馆助理自动替班桌面端工具（Python + Tkinter）。  
+支持读取每周固定排班表、可视化筛选可接/不可接班次、微信聊天/群聊自动监控与秒回抢班、自动更新个人排班并在导出 Excel 时保留多值班人共存。
+
+---
+
+## 核心功能
+
+1. **个人排班读取与可视筛选矩阵**
+   - 读取多工作表排班表（`服务台`、`2楼书库`、`3楼书库`、`4楼书库`、`D5图书室`）。
+   - 输入操作者姓名后自动高亮个人已有班次与时间重叠冲突时段，支持按岗位、整天、整时段或单格自定义不可接时段。
+   - **实时周历同步**：自动将周一至周日对齐到本周实时日期，支持“下周”提前求替，不再因时间推移误屏蔽班次。
+
+2. **双引擎微信聊天监控（支持微信 3.x & 4.0）**
+   - **微信 3.x (`WeChat.exe`)**：UIAutomation 控件读取 + 自动发消息。
+   - **微信 4.0 (`Weixin.exe`)**：`PrintWindow` 后台渲染抓图（支持窗口被部分/完全遮挡时读取）+ 气泡自适应分割（通过左右气泡位置区分本人与对方消息，严格防自接）+ Windows 原生 `WinRT Windows.Media.Ocr` 中文识别 + 自动折行/断词拼接修复。
+
+3. **三层自然语言消息解析与防风控策略**
+   - **统一时间词法配对**：兼容 12/24 小时制及混合紧缩写法（如 `9-1030`、`8-930`、`2-330`、`1230-2`、`15:30-18:00`、`1400-1530 1530 1800`、`两点到六点`、`十点半到十二点半`、`D5 上午/晚上`），并屏蔽日期（`11.18`、`11月19日`）与楼层号误识别。
+   - **排班表模糊反查**：支持`早班`、`午班`、`闭馆班`或`发信人 + 星期 + 时段`在排班表中反查定位。
+   - **可选 AI 语义兜底**：第 4 标签页可选填入 OpenAI 兼容 API（默认留空不启用，仅在本地规则与排班表反查均无法提取时触发）。
+   - **多班防脚本风控与口语回复**：一条消息包含多个可接班次时默认只接第 1 个班次；单班消息全部接下直接回复 `我可以`，多班/部分接取采用口语 12 小时制（如 `我可以 周日9-12`、`我可以 周四2-330`、`我可以 6-8`）。
+
+4. **防搞混更新、一键撤销与 Excel 导出**
+   - 接班后精准替换被替班人姓名（双人岗绝不覆盖同班另一位同学），同步更新第 1 页排班矩阵高亮展示（`🟪 替接`）。
+   - 第 4 标签页记录每次替班快照，支持一键撤销恢复原状；支持保留原表样式导出最新 `.xlsx` 排班表。
+
+---
+
+## 目录结构
+
+```text
+library-shift-assistant/
+├── app.py                        # Tkinter 桌面端主界面与核心交互控制
+├── schedule_manager.py           # 多 Sheet 排班解析、周日期同步、冲突检测与 Excel 导出
+├── message_parser.py             # 多格式时间/岗位/星期解析、连班拆分与风控回复生成
+├── wechat_monitor.py             # 微信 3.x UIA 与微信 4.0 后台截屏+WinRT OCR 监控引擎
+├── 示例排班表.xlsx               # 脱敏示例排班表（含标准格式，可放入真实排班表自动覆盖）
+├── 使用说明.txt                   # 日常使用说明
+└── requirements.txt              # Python 运行依赖清单
+```
+
+---
+
+## 运行环境要求
+
+- **操作系统**：64 位 Windows 10 / Windows 11（微信 4.0 视觉识别依赖系统内置简体中文 `Windows.Media.Ocr` 引擎）
+- **Python**：3.10+（开发验证环境为 Python 3.14.3）
+
+---
+
+## 从源码运行
+
+```powershell
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 启动桌面程序
+python app.py
+```
+
+---
+
+## 打包为单文件 `.exe`（内嵌排班表，开箱即用）
+
+如需打包成可单独分发给同学的双击即用 `.exe`（需额外安装 `pip install pyinstaller`）：
+
+```powershell
+python -m PyInstaller --noconfirm --onefile --windowed `
+  --name "图书馆自动替班助手" `
+  --distpath "." `
+  --add-data "示例排班表.xlsx;." `
+  --collect-all "uiautomation" `
+  --collect-all "winrt" `
+  --collect-submodules "PIL" `
+  --collect-submodules "comtypes" `
+  --hidden-import "comtypes" `
+  --hidden-import "comtypes.stream" `
+  --hidden-import "openpyxl" `
+  --exclude-module "torch" `
+  --exclude-module "transformers" `
+  --exclude-module "numpy" `
+  --exclude-module "cv2" `
+  --exclude-module "fitz" `
+  --exclude-module "openai" `
+  --exclude-module "litellm" `
+  app.py
+```
+
+打包完成后，单独把生成的 `.exe`（建议压缩为 `.zip` 发送）发给同学即可运行；若需更换新周期排班表，将包含“排班”字样的新 `.xlsx` 放在 `.exe` 同级目录或通过软件内导入按钮加载即可。
