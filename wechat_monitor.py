@@ -14,6 +14,7 @@ PC端微信群/聊天窗口实时监控与极速自动回复模块 (wechat_monit
 
 from __future__ import annotations
 import asyncio
+import atexit
 import ctypes
 from ctypes import wintypes
 import datetime
@@ -40,7 +41,18 @@ GMEM_MOVEABLE = 0x0002
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PW_RENDERFULLCONTENT = 0x00000002
 DIB_RGB_COLORS = 0
+SW_SHOWNOACTIVATE = 4
 SW_RESTORE = 9
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+LWA_ALPHA = 0x00000002
+HWND_BOTTOM = 1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 
 user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindow.restype = wintypes.BOOL
@@ -74,6 +86,14 @@ user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BO
 user32.AttachThreadInput.restype = wintypes.BOOL
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.ShowWindow.restype = wintypes.BOOL
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+user32.SetWindowLongW.restype = ctypes.c_long
+user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF, ctypes.c_ubyte, wintypes.DWORD]
+user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.SetWindowPos.restype = wintypes.BOOL
 user32.OpenClipboard.argtypes = [wintypes.HWND]
 user32.OpenClipboard.restype = wintypes.BOOL
 user32.EmptyClipboard.argtypes = []
@@ -667,9 +687,10 @@ def list_wechat_windows() -> List[WeChatWindowInfo]:
         if not user32.IsWindowVisible(hwnd):
             return True
 
+        is_iconic = bool(user32.IsIconic(hwnd))
         rect = wintypes.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        if (rect.right - rect.left) < 200 or (rect.bottom - rect.top) < 200:
+        if not is_iconic and ((rect.right - rect.left) < 200 or (rect.bottom - rect.top) < 200):
             return True
 
         length = user32.GetWindowTextLengthW(hwnd)
@@ -797,6 +818,80 @@ class WeChatMonitor:
         self._recent_processed: Dict[str, float] = {}
         self._last_tail: List[CapturedMessage] = []
 
+        # 后台隐身挂机（等效最小化不挡屏）：透明穿透 + 置底，使 DWM 保持后台渲染供 OCR 持续读取
+        self.keep_background_alive: bool = True
+        self.stealth_active: bool = False
+        self._stealth_hwnd: Optional[int] = None
+        self._stealth_orig_exstyle: Optional[int] = None
+        self._stealth_just_hidden_ts: float = 0.0
+        self._sending_lock = threading.Lock()
+        atexit.register(self._cleanup_stealth_on_exit)
+
+    def _cleanup_stealth_on_exit(self) -> None:
+        try:
+            self.restore_stealth_window(bring_front=False)
+        except Exception:
+            pass
+
+    def enable_stealth_mode(self, hwnd: Optional[int] = None) -> Tuple[bool, str]:
+        """
+        将目标微信窗口转为【后台隐身挂机】状态（等效最小化，不占屏幕、点击穿透、不抢焦点）：
+        即使窗口原已点击“-”最小化，也会先设全透明穿透后再静默恢复渲染尺寸并置底，零闪烁且可持续识别新消息。
+        """
+        target = hwnd or self.target_hwnd
+        if not target or not user32.IsWindow(target):
+            wx_windows = list_wechat_windows()
+            if wx_windows:
+                target = wx_windows[0].hwnd
+        if not target or not user32.IsWindow(target):
+            return False, "未找到已打开的微信窗口（若已完全关闭到右下角托盘，请先点开一次聊天窗）"
+
+        if self._stealth_hwnd and self._stealth_hwnd != target:
+            self.restore_stealth_window(bring_front=False)
+
+        if self._stealth_orig_exstyle is None or self._stealth_hwnd != target:
+            self._stealth_orig_exstyle = user32.GetWindowLongW(target, GWL_EXSTYLE)
+
+        new_ex = self._stealth_orig_exstyle | WS_EX_LAYERED | WS_EX_TRANSPARENT
+        user32.SetWindowLongW(target, GWL_EXSTYLE, new_ex)
+        user32.SetLayeredWindowAttributes(target, 0, 1, LWA_ALPHA)
+        if user32.IsIconic(target):
+            user32.ShowWindow(target, SW_SHOWNOACTIVATE)
+        user32.SetWindowPos(
+            target, HWND_BOTTOM, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        self.target_hwnd = target
+        self._stealth_hwnd = target
+        self.stealth_active = True
+        self._stealth_just_hidden_ts = time.time()
+        return True, "已将微信转入【后台隐身挂机】（完全透明不挡屏、可点击穿透，监控持续读消息；点击任务栏微信图标或停止监控可随时恢复）"
+
+    def restore_stealth_window(self, bring_front: bool = False) -> Tuple[bool, str]:
+        """将处于后台隐身挂机的微信窗口恢复为正常可见状态"""
+        target = self._stealth_hwnd
+        self.stealth_active = False
+        self._stealth_hwnd = None
+        orig_ex = self._stealth_orig_exstyle
+        self._stealth_orig_exstyle = None
+
+        if not target or not user32.IsWindow(target):
+            return False, "微信窗口句柄已失效"
+
+        try:
+            user32.SetLayeredWindowAttributes(target, 0, 255, LWA_ALPHA)
+        except Exception:
+            pass
+        if orig_ex is not None:
+            user32.SetWindowLongW(target, GWL_EXSTYLE, orig_ex)
+        user32.SetWindowPos(
+            target, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        if bring_front:
+            _activate_window(target)
+        return True, "已恢复微信窗口正常显示"
+
     def start(
         self,
         target_hwnd: Optional[int] = None,
@@ -827,6 +922,8 @@ class WeChatMonitor:
     def stop(self) -> None:
         self._stop_event.set()
         self.is_running = False
+        if self.stealth_active:
+            self.restore_stealth_window(bring_front=False)
         if self.on_status_change:
             self.on_status_change(False, "监控已停止")
 
@@ -1111,45 +1208,73 @@ class WeChatMonitor:
             self._last_send_time = now_ts
             return True, f"【演练模式/仅提醒】已模拟发送回复：「{reply_text}」（未实际向微信按键）"
 
-        try:
-            import uiautomation as auto
-            wx_ctrl = self._find_target_control(auto)
-            if not wx_ctrl or not self.target_hwnd:
-                return False, "未找到打开的微信窗口，无法自动发送"
+        with self._sending_lock:
+            was_stealth = (self.stealth_active and self._stealth_hwnd == self.target_hwnd)
+            saved_stealth_hwnd = self._stealth_hwnd
+            saved_orig_ex = self._stealth_orig_exstyle
+            prev_fg = user32.GetForegroundWindow() if was_stealth else None
+            try:
+                import uiautomation as auto
+                wx_ctrl = self._find_target_control(auto)
+                if not wx_ctrl or not self.target_hwnd:
+                    return False, "未找到打开的微信窗口，无法自动发送"
 
-            if not set_clipboard_text(reply_text):
-                return False, "写入系统剪贴板失败"
+                if not set_clipboard_text(reply_text):
+                    return False, "写入系统剪贴板失败"
 
-            _activate_window(self.target_hwnd)
-            time.sleep(0.08)
+                if was_stealth and saved_stealth_hwnd:
+                    user32.SetLayeredWindowAttributes(saved_stealth_hwnd, 0, 255, LWA_ALPHA)
+                    if saved_orig_ex is not None:
+                        user32.SetWindowLongW(saved_stealth_hwnd, GWL_EXSTYLE, saved_orig_ex)
 
-            input_ctrl = self._find_chat_input_control(wx_ctrl)
-            if input_ctrl:
-                input_ctrl.SetFocus()
-                time.sleep(0.03)
-            elif self._cached_input_abs_xy is not None:
-                cx, cy = self._cached_input_abs_xy
-                auto.Click(cx, cy, waitTime=0.05)
-            else:
-                rect = wx_ctrl.BoundingRectangle
-                if rect.width() > 100 and rect.height() > 100:
-                    click_x = int(rect.left + rect.width() * 0.65)
-                    click_y = int(rect.top + rect.height() * 0.88)
-                    auto.Click(click_x, click_y, waitTime=0.05)
+                _activate_window(self.target_hwnd)
+                time.sleep(0.08)
 
-            auto.SendKeys("{Ctrl}v{Enter}", waitTime=0.03)
-            self._last_send_time = time.time()
-            return True, f"已向微信群极速发送：「{reply_text}」"
-        except Exception as e:
-            return False, f"微信自动发送异常: {e}"
+                input_ctrl = self._find_chat_input_control(wx_ctrl)
+                if input_ctrl:
+                    input_ctrl.SetFocus()
+                    time.sleep(0.03)
+                elif self._cached_input_abs_xy is not None:
+                    cx, cy = self._cached_input_abs_xy
+                    auto.Click(cx, cy, waitTime=0.05)
+                else:
+                    rect = wx_ctrl.BoundingRectangle
+                    if rect.width() > 100 and rect.height() > 100:
+                        click_x = int(rect.left + rect.width() * 0.65)
+                        click_y = int(rect.top + rect.height() * 0.88)
+                        auto.Click(click_x, click_y, waitTime=0.05)
+
+                auto.SendKeys("{Ctrl}v{Enter}", waitTime=0.03)
+                self._last_send_time = time.time()
+                return True, f"已向微信群极速发送：「{reply_text}」"
+            except Exception as e:
+                return False, f"微信自动发送异常: {e}"
+            finally:
+                if was_stealth and saved_stealth_hwnd and user32.IsWindow(saved_stealth_hwnd):
+                    base_ex = saved_orig_ex if saved_orig_ex is not None else user32.GetWindowLongW(saved_stealth_hwnd, GWL_EXSTYLE)
+                    user32.SetWindowLongW(saved_stealth_hwnd, GWL_EXSTYLE, base_ex | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+                    user32.SetLayeredWindowAttributes(saved_stealth_hwnd, 0, 1, LWA_ALPHA)
+                    user32.SetWindowPos(
+                        saved_stealth_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    )
+                    self._stealth_just_hidden_ts = time.time()
+                    if prev_fg and prev_fg != saved_stealth_hwnd and user32.IsWindow(prev_fg):
+                        _activate_window(prev_fg)
 
     def _monitor_loop(self) -> None:
         try:
             import uiautomation as auto
             with auto.UIAutomationInitializerInThread():
                 wx_ctrl = self._find_target_control(auto)
-                if not wx_ctrl or not self.target_hwnd:
-                    self._log("⚠️ 暂未检测到打开的微信窗口。请打开 PC 微信聊天窗口（可被遮挡，但不要最小化），监控将自动连接...")
+                if wx_ctrl and self.target_hwnd and user32.IsIconic(self.target_hwnd) and self.keep_background_alive:
+                    ok_st, _ = self.enable_stealth_mode(self.target_hwnd)
+                    if ok_st:
+                        self._log("🫥 启动时检测到微信处于最小化状态，已静默转入【后台隐身挂机】并保持读取")
+                if not wx_ctrl or not self.target_hwnd or user32.IsIconic(self.target_hwnd):
+                    self._log("⚠️ 暂未检测到可用的微信聊天窗口（若已最小化到右下角托盘，请点开一次；任务栏最小化可自动转后台隐身）...")
+                    baseline_initialized = False
+                    warned_no_window = True
                 else:
                     init_msgs, mode_desc = self._extract_messages_dual_engine(wx_ctrl, self.target_hwnd)
                     self._last_engine_used = mode_desc
@@ -1157,16 +1282,25 @@ class WeChatMonitor:
                     self._log(f"✅ 已连接微信窗口: {wx_ctrl.Name} (Class={wx_ctrl.ClassName})")
                     self._log(f"⚙️ 启用读取引擎: {mode_desc}")
                     self._log(f"📌 已记录当前聊天底部 {len(init_msgs)} 条历史消息基线，仅对后续新发出的消息进行判断。")
-
-                warned_no_window = (wx_ctrl is None or self.target_hwnd is None)
-                baseline_initialized = not warned_no_window
+                    warned_no_window = False
+                    baseline_initialized = True
 
                 while not self._stop_event.is_set():
                     try:
                         wx_ctrl = self._find_target_control(auto)
+                        if wx_ctrl and self.target_hwnd and user32.IsIconic(self.target_hwnd) and self.keep_background_alive:
+                            ok_st, _ = self.enable_stealth_mode(self.target_hwnd)
+                            if ok_st:
+                                self._log("🫥 检测到微信窗口被最小化，已自动转入【后台隐身挂机】（透明穿透置底，持续读取消息）")
+
+                        if self.stealth_active and self._stealth_hwnd and not self._sending_lock.locked():
+                            if (time.time() - self._stealth_just_hidden_ts > 0.8) and user32.GetForegroundWindow() == self._stealth_hwnd:
+                                self.restore_stealth_window(bring_front=False)
+                                self._log("👁️ 检测到您主动切回微信窗口，已自动恢复正常可见显示")
+
                         if not wx_ctrl or not self.target_hwnd or user32.IsIconic(self.target_hwnd):
                             if not warned_no_window:
-                                self._log("⚠️ 微信窗口未打开或已最小化，请保持聊天窗口处于非最小化状态（可被其他窗口遮挡）...")
+                                self._log("⚠️ 微信窗口未打开或已最小化到托盘，请保持聊天窗口在任务栏打开（支持最小化转隐身或被遮挡）...")
                                 warned_no_window = True
                             time.sleep(0.8)
                             continue

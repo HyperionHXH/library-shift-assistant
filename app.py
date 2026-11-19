@@ -108,7 +108,9 @@ class LibraryShiftApp(tk.Tk):
         )
 
         self.wx_windows: List[WeChatWindowInfo] = []
-        self.matrix_buttons: Dict[Tuple[str, str], tk.Label] = {}
+        self.post_order: List[str] = ["服务台", "2楼书库", "3楼书库", "4楼书库", "D5图书室"]
+        self.post_tab_frames: Dict[str, tk.Frame] = {}
+        self.matrix_buttons: Dict[Tuple[str, str, str], tk.Label] = {}
         self._last_date_iso: str = datetime.date.today().isoformat()
 
         self._setup_styles()
@@ -391,18 +393,18 @@ class LibraryShiftApp(tk.Tk):
 
         btn_cfg = {"font": ("Microsoft YaHei UI", 8), "relief": tk.GROOVE, "padx": 6, "pady": 3, "cursor": "hand2"}
         tk.Button(
-            batch_box, text="🚫 禁接全部早八班(08:00起)", bg="#FEE2E2", fg="#991B1B",
-            command=lambda: self._batch_block_time(lambda t, s, e, wd: s == 480), **btn_cfg
+            batch_box, text="🚫 禁接早八班(仅服务台)", bg="#FEE2E2", fg="#991B1B",
+            command=lambda: self._batch_block_slots(lambda s: s.start_min == 480), **btn_cfg
         ).grid(row=0, column=0, sticky="ew", padx=3, pady=2)
 
         tk.Button(
             batch_box, text="🚫 禁接全部20:00-23:00闭馆班", bg="#FEE2E2", fg="#991B1B",
-            command=lambda: self._batch_block_time(lambda t, s, e, wd: t == "20:00-23:00"), **btn_cfg
+            command=lambda: self._batch_block_slots(lambda s: s.time_str == "20:00-23:00"), **btn_cfg
         ).grid(row=0, column=1, sticky="ew", padx=3, pady=2)
 
         tk.Button(
             batch_box, text="🚫 禁接周末全部班次(周六/周日)", bg="#FEE2E2", fg="#991B1B",
-            command=lambda: self._batch_block_time(lambda t, s, e, wd: wd in ("周六", "周日")), **btn_cfg
+            command=lambda: self._batch_block_slots(lambda s: s.weekday in ("周六", "周日")), **btn_cfg
         ).grid(row=1, column=0, sticky="ew", padx=3, pady=2)
 
         tk.Button(
@@ -435,8 +437,8 @@ class LibraryShiftApp(tk.Tk):
 
         tk.Label(
             header_row,
-            text="🗓️ 全周排班与时间段筛选图（点击格子切换【🟩可接】/【🟥不能接】）",
-            font=("Microsoft YaHei UI", 10, "bold"),
+            text="🗓️ 分岗位独立筛选图（服务台/各书库/D5拆开独立设置；20-22与20-23为独立两班岗）",
+            font=("Microsoft YaHei UI", 9, "bold"),
             bg="#FFFFFF",
             fg="#111827",
         ).pack(side=tk.LEFT)
@@ -456,7 +458,7 @@ class LibraryShiftApp(tk.Tk):
         legend_frame.pack(fill=tk.X, pady=(0, 6))
         for bg_c, fg_c, txt in [
             ("#DBEAFE", "#1E40AF", "🟦 本人原班"),
-            ("#EDE9FE", "#5B21B6", "🟪 替班新接(已成功接下)"),
+            ("#EDE9FE", "#5B21B6", "🟪 替班新接"),
             ("#FEF3C7", "#92400E", "🟧 时间冲突"),
             ("#FEE2E2", "#991B1B", "🟥 设为不能接(点击恢复)"),
             ("#DCFCE7", "#166534", "🟩 允许接班(点击禁接)"),
@@ -466,115 +468,147 @@ class LibraryShiftApp(tk.Tk):
                 bg=bg_c, fg=fg_c, padx=6, pady=2
             ).pack(side=tk.LEFT, padx=(0, 6))
 
-        # 矩阵滚动容器
-        canvas_frame = tk.Frame(right_panel, bg="#FFFFFF")
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.matrix_canvas = tk.Canvas(canvas_frame, bg="#FFFFFF", highlightthickness=0)
-        v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.matrix_canvas.yview)
-        self.matrix_inner = tk.Frame(self.matrix_canvas, bg="#E5E7EB")
-
-        self.matrix_inner.bind(
-            "<Configure>",
-            lambda _e: self.matrix_canvas.configure(scrollregion=self.matrix_canvas.bbox("all")),
-        )
-        self.matrix_canvas.create_window((0, 0), window=self.matrix_inner, anchor="nw")
-        self.matrix_canvas.configure(yscrollcommand=v_scroll.set)
-
-        self.matrix_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        def _on_mousewheel(event):
-            self.matrix_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        self.matrix_canvas.bind("<Enter>", lambda _e: self.matrix_canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        self.matrix_canvas.bind("<Leave>", lambda _e: self.matrix_canvas.unbind_all("<MouseWheel>"))
+        # 按岗位拆开的分选项卡矩阵容器
+        self.post_matrix_notebook = ttk.Notebook(right_panel)
+        self.post_matrix_notebook.pack(fill=tk.BOTH, expand=True)
 
         self._build_matrix_grid()
 
     def _build_matrix_grid(self) -> None:
-        """构建 周一~周日 × 标准时段 的交互式网格"""
-        for w in self.matrix_inner.winfo_children():
-            w.destroy()
+        """按岗位（服务台 / 2楼书库 / 3楼书库 / 4楼书库 / D5图书室）拆开构建独立课表筛选矩阵"""
+        for tab_id in self.post_matrix_notebook.tabs():
+            self.post_matrix_notebook.forget(tab_id)
+        for fr in self.post_tab_frames.values():
+            fr.destroy()
+        self.post_tab_frames.clear()
         self.matrix_buttons.clear()
 
-        # 表头：时段说明 + 周一~周日（点击星期列标题可整天切换禁接！）
-        tk.Label(
-            self.matrix_inner,
-            text="时段 \\ 星期 (点击列头整天禁接)",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            bg="#334155",
-            fg="#FFFFFF",
-            width=22,
-            pady=6,
-        ).grid(row=0, column=0, padx=1, pady=1, sticky="nsew")
-
+        post_notes = {
+            "服务台": "服务台独立班表（含早班 08:00 起及晚班 20:00-23:00；注意：服务台无 20:00-22:00 班次，禁用此处不影响书库）",
+            "2楼书库": "2楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
+            "3楼书库": "3楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
+            "4楼书库": "4楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
+            "D5图书室": "D5图书室独立班表（仅含 上午 / 晚上 弹性班次，无 20:00-22:00 等固定钟点班）",
+        }
         today_iso = datetime.date.today().isoformat()
-        for c_idx, wd in enumerate(WEEKDAYS, start=1):
-            d_str, iso_d = self.schedule_mgr.weekday_dates.get(wd, ("", ""))
-            is_today = (iso_d == today_iso)
-            hdr_text = f"{wd} ({d_str})\n{'[今天]' if is_today else '点击整列切换'}"
-            hdr_bg = "#0284C7" if is_today else "#334155"
-            lbl = tk.Label(
-                self.matrix_inner,
-                text=hdr_text,
-                font=("Microsoft YaHei UI", 9, "bold"),
-                bg=hdr_bg,
-                fg="#FFFFFF",
-                width=13,
-                pady=4,
-                cursor="hand2",
-            )
-            lbl.grid(row=0, column=c_idx, padx=1, pady=1, sticky="nsew")
-            lbl.bind("<Button-1>", lambda _e, w=wd: self._toggle_entire_weekday(w))
 
-        # 每一行对应一个标准时段
-        for r_idx, (t_str, s_min, e_min, desc) in enumerate(STANDARD_TIME_SLOTS, start=1):
-            row_hdr = tk.Label(
-                self.matrix_inner,
-                text=f"{t_str}\n{desc}",
-                font=("Microsoft YaHei UI", 8, "bold"),
+        for post in self.post_order:
+            tab_fr = tk.Frame(self.post_matrix_notebook, bg="#FFFFFF", padx=6, pady=6)
+            self.post_matrix_notebook.add(tab_fr, text=f" {post} ")
+            self.post_tab_frames[post] = tab_fr
+
+            # 顶部说明与本岗快捷操作栏
+            bar = tk.Frame(tab_fr, bg="#F8FAFC", padx=8, pady=5)
+            bar.pack(fill=tk.X, pady=(0, 6))
+
+            tk.Label(
+                bar,
+                text=post_notes.get(post, f"{post}独立班表"),
+                font=("Microsoft YaHei UI", 8),
                 bg="#F8FAFC",
-                fg="#334155",
-                padx=6,
-                pady=4,
-                cursor="hand2",
-            )
-            row_hdr.grid(row=r_idx, column=0, padx=1, pady=1, sticky="nsew")
-            row_hdr.bind("<Button-1>", lambda _e, ts=t_str: self._toggle_entire_timeslot_row(ts))
+                fg="#475569",
+                anchor="w",
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            act_cfg = {"font": ("Microsoft YaHei UI", 8), "relief": tk.GROOVE, "padx": 6, "pady": 2, "cursor": "hand2"}
+            if "书库" in post:
+                tk.Button(
+                    bar, text="📋 同步本楼层禁用到2/3/4楼书库", bg="#EEF2FF", fg="#3730A3",
+                    command=lambda p=post: self._copy_bookstack_blocks(p), **act_cfg
+                ).pack(side=tk.RIGHT, padx=(4, 0))
+            tk.Button(
+                bar, text="✅ 本岗全开", bg="#DCFCE7", fg="#166534",
+                command=lambda p=post: self._set_post_all_blocked(p, False), **act_cfg
+            ).pack(side=tk.RIGHT, padx=(4, 0))
+            tk.Button(
+                bar, text="🚫 本岗全禁", bg="#FEE2E2", fg="#991B1B",
+                command=lambda p=post: self._set_post_all_blocked(p, True), **act_cfg
+            ).pack(side=tk.RIGHT, padx=(4, 0))
+
+            canvas_frame = tk.Frame(tab_fr, bg="#FFFFFF")
+            canvas_frame.pack(fill=tk.BOTH, expand=True)
+            canvas = tk.Canvas(canvas_frame, bg="#FFFFFF", highlightthickness=0)
+            v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+            inner = tk.Frame(canvas, bg="#E5E7EB")
+            inner.bind("<Configure>", lambda _e, cv=canvas: cv.configure(scrollregion=cv.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=v_scroll.set)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # 表头
+            tk.Label(
+                inner,
+                text=f"{post} \\ 星期\n(点击列头整天切本岗)",
+                font=("Microsoft YaHei UI", 8, "bold"),
+                bg="#334155",
+                fg="#FFFFFF",
+                width=22,
+                pady=5,
+            ).grid(row=0, column=0, padx=1, pady=1, sticky="nsew")
 
             for c_idx, wd in enumerate(WEEKDAYS, start=1):
-                # 检查该星期+时段在全馆是否有任何排班
-                has_any_slot = any(
-                    s.weekday == wd and s.time_str == t_str
-                    for s in self.schedule_mgr.slots.values()
-                )
-                if not has_any_slot:
-                    empty_lbl = tk.Label(
-                        self.matrix_inner,
-                        text="—",
-                        font=("Microsoft YaHei UI", 8),
-                        bg="#F3F4F6",
-                        fg="#9CA3AF",
-                        width=13,
-                        pady=6,
-                    )
-                    empty_lbl.grid(row=r_idx, column=c_idx, padx=1, pady=1, sticky="nsew")
-                    continue
-
-                cell = tk.Label(
-                    self.matrix_inner,
-                    text="可接",
-                    font=("Microsoft YaHei UI", 8, "bold"),
-                    bg="#DCFCE7",
-                    fg="#166534",
+                d_str, iso_d = self.schedule_mgr.weekday_dates.get(wd, ("", ""))
+                is_today = (iso_d == today_iso)
+                hdr_text = f"{wd} ({d_str})\n{'[今天]' if is_today else '点击切本列'}"
+                hdr_bg = "#0284C7" if is_today else "#334155"
+                lbl = tk.Label(
+                    inner,
+                    text=hdr_text,
+                    font=("Microsoft YaHei UI", 9, "bold"),
+                    bg=hdr_bg,
+                    fg="#FFFFFF",
                     width=13,
-                    pady=6,
+                    pady=4,
                     cursor="hand2",
                 )
-                cell.grid(row=r_idx, column=c_idx, padx=1, pady=1, sticky="nsew")
-                cell.bind("<Button-1>", lambda _e, w=wd, ts=t_str: self._on_matrix_cell_clicked(w, ts))
-                self.matrix_buttons[(wd, t_str)] = cell
+                lbl.grid(row=0, column=c_idx, padx=1, pady=1, sticky="nsew")
+                lbl.bind("<Button-1>", lambda _e, p=post, w=wd: self._toggle_entire_weekday(p, w))
+
+            # 仅列出该岗位在排班表里真实存在的时段行
+            post_rows = self.schedule_mgr.get_post_time_rows(post)
+            for r_idx, (t_str, _s_min, _e_min, desc) in enumerate(post_rows, start=1):
+                row_hdr = tk.Label(
+                    inner,
+                    text=f"{t_str}\n{desc}",
+                    font=("Microsoft YaHei UI", 8, "bold"),
+                    bg="#F8FAFC",
+                    fg="#334155",
+                    padx=6,
+                    pady=4,
+                    cursor="hand2",
+                )
+                row_hdr.grid(row=r_idx, column=0, padx=1, pady=1, sticky="nsew")
+                row_hdr.bind("<Button-1>", lambda _e, p=post, ts=t_str: self._toggle_entire_timeslot_row(p, ts))
+
+                for c_idx, wd in enumerate(WEEKDAYS, start=1):
+                    sid = f"{post}|{wd}|{t_str}"
+                    if sid not in self.schedule_mgr.slots:
+                        empty_lbl = tk.Label(
+                            inner,
+                            text="—",
+                            font=("Microsoft YaHei UI", 8),
+                            bg="#F3F4F6",
+                            fg="#9CA3AF",
+                            width=13,
+                            pady=6,
+                        )
+                        empty_lbl.grid(row=r_idx, column=c_idx, padx=1, pady=1, sticky="nsew")
+                        continue
+
+                    cell = tk.Label(
+                        inner,
+                        text="🟩 可接",
+                        font=("Microsoft YaHei UI", 8, "bold"),
+                        bg="#DCFCE7",
+                        fg="#166534",
+                        width=13,
+                        pady=6,
+                        cursor="hand2",
+                    )
+                    cell.grid(row=r_idx, column=c_idx, padx=1, pady=1, sticky="nsew")
+                    cell.bind("<Button-1>", lambda _e, p=post, w=wd, ts=t_str: self._on_matrix_cell_clicked(p, w, ts))
+                    self.matrix_buttons[(post, wd, t_str)] = cell
 
     # ------------------------------------------------------------------
     # Tab 2: 全馆分岗位排班总表与手动替班
@@ -771,6 +805,32 @@ class LibraryShiftApp(tk.Tk):
             wx_box, text="多班/部分接班时回复带上12小时制简写时间（如“我可以 周日9-12”）",
             variable=self.partial_with_time_var, command=self._on_parser_opt_toggled, **cb_opts
         ).grid(row=8, column=0, columnspan=3, sticky="w", pady=1)
+
+        self.keep_bg_var = tk.BooleanVar(value=self.monitor.keep_background_alive)
+        tk.Checkbutton(
+            wx_box, text="最小化防断连：微信被最小化时自动转入【后台隐身挂机】（透明穿透不挡屏）",
+            variable=self.keep_bg_var, command=self._on_stealth_opt_toggled, **cb_opts
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=1)
+
+        stealth_row = tk.Frame(wx_box, bg="#FFFFFF")
+        stealth_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        tk.Button(
+            stealth_row, text="🫥 一键微信隐身挂机(等效最小化)",
+            font=("Microsoft YaHei UI", 8, "bold"), bg="#EDE9FE", fg="#5B21B6",
+            relief=tk.GROOVE, padx=8, pady=3, cursor="hand2",
+            command=self._on_enable_stealth_clicked,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(
+            stealth_row, text="👁️ 恢复微信正常显示",
+            font=("Microsoft YaHei UI", 8), bg="#E0F2FE", fg="#0369A1",
+            relief=tk.GROOVE, padx=8, pady=3, cursor="hand2",
+            command=self._on_restore_stealth_clicked,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            wx_box,
+            text="说明：请保留聊天窗在任务栏(勿点右上角×关进托盘)；启用隐身挂机后可全屏打游戏/看剧不挡屏，点任务栏微信图标会自动恢复。",
+            bg="#FFFFFF", fg="#64748B", font=("Microsoft YaHei UI", 8), wraplength=445, justify=tk.LEFT,
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(1, 0))
 
         wx_box.columnconfigure(1, weight=1)
 
@@ -1132,71 +1192,137 @@ class LibraryShiftApp(tk.Tk):
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _on_matrix_cell_clicked(self, weekday: str, time_str: str) -> None:
-        """点击全周矩阵中的某个时段单元格，切换【可接】与【不可接】"""
+    def _on_matrix_cell_clicked(self, post: str, weekday: str, time_str: str) -> None:
+        """点击某岗位的排班格子，仅切换该岗位该时段（post|weekday|time_str）的可接/不可接状态"""
+        sid = f"{post}|{weekday}|{time_str}"
+        slot = self.schedule_mgr.slots.get(sid)
+        if not slot:
+            return
+
         op = self.schedule_mgr.operator_name.strip()
-        _, s_min, e_min = next(
-            ((t, sm, em) for t, sm, em, _ in STANDARD_TIME_SLOTS if t == time_str),
-            (time_str, 0, 0),
-        )
         if op:
-            conflict = self.schedule_mgr.is_time_window_conflicting_with_existing(op, weekday, s_min, e_min)
-            if conflict:
-                is_sub = not conflict.was_originally_held_by(op)
-                if is_sub and conflict.time_str == time_str:
+            if slot.has_holder(op):
+                is_sub = not slot.was_originally_held_by(op)
+                if is_sub:
                     messagebox.showinfo(
                         "已替班接下",
-                        f"您已替班接下【{weekday} {conflict.time_str} {conflict.post}】！\n"
+                        f"您已替班接下【{post} {weekday} {slot.time_str}】！\n"
                         f"如需退回/撤销，请前往第 4 选项卡【替班记录】选中后点击撤销。",
                     )
                 else:
-                    messagebox.showwarning(
-                        "已有班次冲突",
-                        f"您在【{weekday} {conflict.time_str}】已有【{conflict.post}】的班次！\n"
-                        f"系统已自动锁定排除该时间段及重叠时间段，防止撞班。",
+                    messagebox.showinfo(
+                        "本人原固定班次",
+                        f"【{post} {weekday} {slot.time_str}】是您本人的原固定班次。",
                     )
                 return
 
-        key = f"{weekday}|{time_str}"
-        if key in self.schedule_mgr.blocked_time_keys:
-            self.schedule_mgr.blocked_time_keys.remove(key)
+            conflict = self.schedule_mgr.is_time_window_conflicting_with_existing(op, weekday, slot.start_min, slot.end_min)
+            if conflict:
+                messagebox.showwarning(
+                    "已有班次冲突",
+                    f"您在【{weekday} {conflict.time_str}】已有【{conflict.post}】的班次！\n"
+                    f"时间重叠无法同时接【{post} {slot.time_str}】，系统已自动锁定排除。",
+                )
+                return
+
+        if post not in self.schedule_mgr.allowed_posts:
+            if messagebox.askyesno(
+                "岗位当前被整体禁用",
+                f"您当前在左侧取消勾选了【{post}】整个岗位，因此该岗位所有班次都不可接。\n是否立即重新启用【{post}】岗位并开放此班次？",
+            ):
+                self.post_vars[post].set(True)
+                self.schedule_mgr.allowed_posts.add(post)
+                self.schedule_mgr.blocked_slot_ids.discard(sid)
+                self.schedule_mgr.save_state()
+                self._refresh_all_views()
+            return
+
+        # 严格按单个 slot_id 切换禁接状态（书库与服务台完全独立，20-22 与 20-23 完全独立）
+        legacy_key = f"{weekday}|{time_str}"
+        self.schedule_mgr.blocked_time_keys.discard(legacy_key)
+        if sid in self.schedule_mgr.blocked_slot_ids:
+            self.schedule_mgr.blocked_slot_ids.remove(sid)
         else:
-            self.schedule_mgr.blocked_time_keys.add(key)
+            self.schedule_mgr.blocked_slot_ids.add(sid)
 
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _toggle_entire_weekday(self, weekday: str) -> None:
-        """点击星期列标题，整列切换该天所有时段的禁接状态"""
-        day_keys = [f"{weekday}|{t}" for t, _, _, _ in STANDARD_TIME_SLOTS]
-        any_unblocked = any(k not in self.schedule_mgr.blocked_time_keys for k in day_keys)
+    def _toggle_entire_weekday(self, post: str, weekday: str) -> None:
+        """点击某岗位某天列头，仅整列切换该岗位在该天的所有时段"""
+        day_sids = [
+            s.slot_id for s in self.schedule_mgr.slots.values()
+            if s.post == post and s.weekday == weekday
+        ]
+        if not day_sids:
+            return
+        any_unblocked = any(sid not in self.schedule_mgr.blocked_slot_ids for sid in day_sids)
         if any_unblocked:
-            for k in day_keys:
-                self.schedule_mgr.blocked_time_keys.add(k)
+            for sid in day_sids:
+                self.schedule_mgr.blocked_slot_ids.add(sid)
         else:
-            for k in day_keys:
-                self.schedule_mgr.blocked_time_keys.discard(k)
+            for sid in day_sids:
+                self.schedule_mgr.blocked_slot_ids.discard(sid)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _toggle_entire_timeslot_row(self, time_str: str) -> None:
-        """点击左侧时段行标题，整行切换周一至周日该时段的禁接状态"""
-        row_keys = [f"{wd}|{time_str}" for wd in WEEKDAYS]
-        any_unblocked = any(k not in self.schedule_mgr.blocked_time_keys for k in row_keys)
+    def _toggle_entire_timeslot_row(self, post: str, time_str: str) -> None:
+        """点击某岗位左侧时段行标题，仅整行切换该岗位在周一至周日该时段的禁接状态"""
+        row_sids = [
+            s.slot_id for s in self.schedule_mgr.slots.values()
+            if s.post == post and s.time_str == time_str
+        ]
+        if not row_sids:
+            return
+        any_unblocked = any(sid not in self.schedule_mgr.blocked_slot_ids for sid in row_sids)
         if any_unblocked:
-            for k in row_keys:
-                self.schedule_mgr.blocked_time_keys.add(k)
+            for sid in row_sids:
+                self.schedule_mgr.blocked_slot_ids.add(sid)
         else:
-            for k in row_keys:
-                self.schedule_mgr.blocked_time_keys.discard(k)
+            for sid in row_sids:
+                self.schedule_mgr.blocked_slot_ids.discard(sid)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _batch_block_time(self, predicate) -> None:
-        for t_str, s_min, e_min, _ in STANDARD_TIME_SLOTS:
-            for wd in WEEKDAYS:
-                if predicate(t_str, s_min, e_min, wd):
-                    self.schedule_mgr.blocked_time_keys.add(f"{wd}|{t_str}")
+    def _set_post_all_blocked(self, post: str, block: bool) -> None:
+        """快速将单个岗位的全部具体班次设为禁接或开放"""
+        for s in self.schedule_mgr.slots.values():
+            if s.post == post:
+                if block:
+                    self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
+                else:
+                    self.schedule_mgr.blocked_slot_ids.discard(s.slot_id)
+        self.schedule_mgr.save_state()
+        self._refresh_all_views()
+
+    def _copy_bookstack_blocks(self, src_post: str) -> None:
+        """将当前楼层书库(如 2楼书库)的手动禁接矩阵复制到其他两个书库楼层(不影响服务台)"""
+        bookstacks = ["2楼书库", "3楼书库", "4楼书库"]
+        if src_post not in bookstacks:
+            return
+        blocked_wd_time = {
+            (s.weekday, s.time_str)
+            for s in self.schedule_mgr.slots.values()
+            if s.post == src_post and s.slot_id in self.schedule_mgr.blocked_slot_ids
+        }
+        for dst_post in bookstacks:
+            if dst_post == src_post:
+                continue
+            for s in self.schedule_mgr.slots.values():
+                if s.post == dst_post:
+                    if (s.weekday, s.time_str) in blocked_wd_time:
+                        self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
+                    else:
+                        self.schedule_mgr.blocked_slot_ids.discard(s.slot_id)
+        self.schedule_mgr.save_state()
+        self._refresh_all_views()
+        messagebox.showinfo("同步完成", f"已将【{src_post}】的禁接设置同步到 2楼/3楼/4楼书库（未影响服务台）。")
+
+    def _batch_block_slots(self, predicate) -> None:
+        """按精准条件批量将具体班次槽位加入 blocked_slot_ids"""
+        for s in self.schedule_mgr.slots.values():
+            if predicate(s):
+                self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
@@ -1210,7 +1336,7 @@ class LibraryShiftApp(tk.Tk):
         self._refresh_all_views()
 
     def _refresh_all_views(self) -> None:
-        """刷新个人班表、全周矩阵、全馆排班表、替班历史与顶部统计"""
+        """刷新个人班表、分岗位全周矩阵、全馆排班表、替班历史与顶部统计"""
         op = self.schedule_mgr.operator_name.strip()
 
         # 1. 刷新个人班次列表（原班次蓝色、替班新接紫色高亮）
@@ -1231,50 +1357,48 @@ class LibraryShiftApp(tk.Tk):
                 tags=("ORIG" if is_orig else "NEW_SUB",),
             )
 
-        # 2. 刷新全周时段矩阵颜色与文字（清晰区分：原班 🟦 / 新接替班 🟪 / 撞班冲突 🟧 / 禁接 🟥 / 可接 🟩）
-        for (wd, t_str), lbl in self.matrix_buttons.items():
-            _, s_min, e_min = next(
-                ((t, sm, em) for t, sm, em, _ in STANDARD_TIME_SLOTS if t == t_str),
-                (t_str, 0, 0),
-            )
-            owned_here = [
-                s for s in my_slots
-                if s.weekday == wd and s.time_str == t_str
-            ]
-            if owned_here:
-                sub_here = [s for s in owned_here if not s.was_originally_held_by(op)]
-                orig_here = [s for s in owned_here if s.was_originally_held_by(op)]
-                if sub_here:
-                    posts_str = "/".join(s.post for s in sub_here)
-                    lbl.configure(text=f"🟪 替接:{posts_str}", bg="#EDE9FE", fg="#5B21B6")
+        # 2. 刷新分岗位独立筛选矩阵与子选项卡计数标题
+        post_stats = {p: {"avail": 0, "owned": 0, "sub": 0} for p in self.post_order}
+        for (post, wd, t_str), lbl in self.matrix_buttons.items():
+            sid = f"{post}|{wd}|{t_str}"
+            slot = self.schedule_mgr.slots.get(sid)
+            if not slot:
+                continue
+
+            st, _ = self.schedule_mgr.evaluate_slot_status(slot, op, check_expired=False)
+            if st == "OWNED":
+                is_orig = slot.was_originally_held_by(op)
+                if is_orig:
+                    post_stats[post]["owned"] += 1
+                    lbl.configure(text="🟦 原班", bg="#DBEAFE", fg="#1E40AF")
                 else:
-                    posts_str = "/".join(s.post for s in orig_here)
-                    lbl.configure(text=f"🟦 原班:{posts_str}", bg="#DBEAFE", fg="#1E40AF")
-                continue
-
-            conflict_slot = self.schedule_mgr.is_time_window_conflicting_with_existing(op, wd, s_min, e_min) if op else None
-            if conflict_slot:
-                lbl.configure(text=f"🟧 冲突({conflict_slot.time_str})", bg="#FEF3C7", fg="#92400E")
-                continue
-
-            if self.schedule_mgr.is_time_window_blocked_by_user(wd, s_min, e_min, t_str):
+                    post_stats[post]["sub"] += 1
+                    lbl.configure(text="🟪 替接", bg="#EDE9FE", fg="#5B21B6")
+            elif st == "CONFLICT":
+                c_slot = self.schedule_mgr.is_time_window_conflicting_with_existing(op, wd, slot.start_min, slot.end_min)
+                c_hint = f"{c_slot.post[:3]} {c_slot.time_str}" if c_slot else "时段重叠"
+                lbl.configure(text=f"🟧 冲突\n({c_hint})", bg="#FEF3C7", fg="#92400E")
+            elif st == "BLOCKED_POST":
+                lbl.configure(text="🟥 岗位已禁", bg="#FEE2E2", fg="#991B1B")
+            elif st in ("BLOCKED_SLOT", "BLOCKED_TIME"):
                 lbl.configure(text="🟥 不能接", bg="#FEE2E2", fg="#991B1B")
             else:
-                # 统计该 (星期, 时段) 下经过岗位与单班筛选后实际允许的岗位
-                cell_slots = [
-                    s for s in self.schedule_mgr.slots.values()
-                    if s.weekday == wd and s.time_str == t_str
-                ]
-                avail_posts = [
-                    s.post for s in cell_slots
-                    if self.schedule_mgr.evaluate_slot_status(s, op, check_expired=False)[0] == "AVAILABLE"
-                ]
-                if not avail_posts:
-                    lbl.configure(text="🟥 岗位/已禁", bg="#FEE2E2", fg="#991B1B")
-                elif len(avail_posts) == 1:
-                    lbl.configure(text=f"🟩 {avail_posts[0]}", bg="#DCFCE7", fg="#166534")
-                else:
-                    lbl.configure(text=f"🟩 可接({len(avail_posts)}岗)", bg="#DCFCE7", fg="#166534")
+                post_stats[post]["avail"] += 1
+                txt = "🟩 可接(2人)" if len(slot.current_holders) >= 2 else "🟩 可接"
+                lbl.configure(text=txt, bg="#DCFCE7", fg="#166534")
+
+        post_icons = {"服务台": "🛎️", "2楼书库": "📚", "3楼书库": "📚", "4楼书库": "📚", "D5图书室": "📖"}
+        for post, tab_fr in self.post_tab_frames.items():
+            st_p = post_stats[post]
+            if post not in self.schedule_mgr.allowed_posts:
+                badge = "已禁岗"
+            else:
+                parts = []
+                if st_p["owned"] or st_p["sub"]:
+                    parts.append(f"原{st_p['owned'] + st_p['sub']}")
+                parts.append(f"可{st_p['avail']}")
+                badge = "/".join(parts)
+            self.post_matrix_notebook.tab(tab_fr, text=f" {post_icons.get(post, '')} {post} ({badge}) ")
 
         # 3. 刷新全馆排班总表
         self._refresh_all_shifts_table()
@@ -1621,6 +1745,23 @@ class LibraryShiftApp(tk.Tk):
             fg="#166534" if res.should_take else "#991B1B",
         )
 
+    def _on_stealth_opt_toggled(self) -> None:
+        self.monitor.keep_background_alive = self.keep_bg_var.get()
+
+    def _on_enable_stealth_clicked(self) -> None:
+        self._refresh_wechat_window_list()
+        hwnd = self._get_selected_hwnd()
+        ok, msg = self.monitor.enable_stealth_mode(hwnd)
+        self._append_log(f"{'🫥' if ok else '⚠️'} {msg}", "INFO" if ok else "SKIP")
+        if not ok:
+            messagebox.showwarning("无法开启隐身挂机", msg)
+
+    def _on_restore_stealth_clicked(self) -> None:
+        ok, msg = self.monitor.restore_stealth_window(bring_front=True)
+        self._append_log(f"👁️ {msg}", "INFO")
+        if not ok:
+            messagebox.showinfo("提示", "当前没有处于隐身挂机状态的微信窗口。")
+
     def _toggle_monitor(self) -> None:
         if self.monitor.is_running:
             self.monitor.stop()
@@ -1634,6 +1775,7 @@ class LibraryShiftApp(tk.Tk):
             return
 
         self._save_config(show_popup=False)
+        self.monitor.keep_background_alive = self.keep_bg_var.get()
         self._refresh_wechat_window_list()
         hwnd = self._get_selected_hwnd()
         kw = self.group_kw_var.get().strip()
@@ -1723,6 +1865,8 @@ class LibraryShiftApp(tk.Tk):
     def _on_close(self) -> None:
         if self.monitor.is_running:
             self.monitor.stop()
+        else:
+            self.monitor.restore_stealth_window(bring_front=False)
         self.schedule_mgr.save_state()
         self.parser.save_rules()
         self.destroy()

@@ -47,9 +47,9 @@ STANDARD_TIME_SLOTS = [
     ("14:00-16:00", 840, 960, "周末下午一节"),
     ("15:30-18:00", 930, 1080, "平日下午二节"),
     ("16:00-18:00", 960, 1080, "周末下午二节"),
-    ("18:00-20:00", 1080, 1200, "晚班一节"),
-    ("20:00-22:00", 1200, 1320, "晚班二节 (20-22点)"),
-    ("20:00-23:00", 1200, 1380, "晚班闭馆 (20-23点)"),
+    ("18:00-20:00", 1080, 1200, "晚班一节 (18-20点)"),
+    ("20:00-22:00", 1200, 1320, "晚班A岗 (20-22点/仅书库)"),
+    ("20:00-23:00", 1200, 1380, "晚班B/闭馆岗 (20-23点)"),
     ("上午", -1, -1, "D5图书室上午 (弹性1h)"),
     ("晚上", -2, -2, "D5图书室晚上 (弹性1h)"),
 ]
@@ -577,23 +577,46 @@ class ScheduleManager:
                 return slot
         return None
 
+    def get_post_time_rows(self, post: str) -> List[Tuple[str, int, int, str]]:
+        """获取指定岗位在排班表中实际存在的所有去重时段行（例如服务台无20:00-22:00，书库含20-22与20-23两班岗）"""
+        desc_map = {t: desc for t, _, _, desc in STANDARD_TIME_SLOTS}
+        found: Dict[str, Tuple[int, int]] = {}
+        for s in self.slots.values():
+            if s.post == post and s.time_str not in found:
+                found[s.time_str] = (s.start_min, s.end_min)
+
+        rows: List[Tuple[str, int, int, str]] = []
+        for t_str, (st, ed) in found.items():
+            desc = desc_map.get(t_str, "")
+            if not desc:
+                if post == "D5图书室":
+                    desc = "D5弹性1小时"
+                elif st >= 0:
+                    desc = post
+            elif post == "服务台":
+                desc = desc.replace(" (服务台)", "").replace(" (20-23点)", "")
+                if t_str == "20:00-23:00":
+                    desc = "晚班闭馆 (服务台无20-22)"
+            elif "书库" in post:
+                desc = desc.replace(" (书库)", "").replace("/仅书库", "")
+                if t_str == "18:00-20:00":
+                    desc = "晚班一节 (双人岗)"
+                elif t_str == "20:00-22:00":
+                    desc = "晚班两班岗之一 (20-22点)"
+                elif t_str == "20:00-23:00":
+                    desc = "晚班两班岗之一 (20-23点)"
+            rows.append((t_str, st, ed, desc))
+
+        rows.sort(key=lambda r: (0 if r[1] >= 0 else 1, r[1] if r[1] >= 0 else -r[1], r[2], r[0]))
+        return rows
+
     def is_time_window_blocked_by_user(self, weekday: str, start_min: int, end_min: int, time_str: str = "") -> bool:
         """
-        检查某星期+时间段是否与用户标记为“不可接（有课/有事）”的时间段重叠。
+        兼容旧版全局禁接键（精确匹配 weekday|time_str，不再做区间重叠误杀，保证 20-22 与 20-23 互不牵连）。
+        新界面按岗位独立将 slot_id 存入 blocked_slot_ids。
         """
         if time_str and f"{weekday}|{time_str}" in self.blocked_time_keys:
             return True
-        # 检查所有被封禁的通用时段是否与当前时段发生时间重叠
-        for key in self.blocked_time_keys:
-            parts = key.split("|", 1)
-            if len(parts) != 2:
-                continue
-            b_wd, b_tstr = parts
-            if b_wd != weekday:
-                continue
-            _, b_start, b_end = normalize_time_str(b_tstr)
-            if times_overlap(b_start, b_end, start_min, end_min):
-                return True
         return False
 
     def is_slot_expired(self, slot: ShiftSlot, now: Optional[datetime.datetime] = None) -> bool:
