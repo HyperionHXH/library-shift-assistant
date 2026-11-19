@@ -7,6 +7,7 @@
 from __future__ import annotations
 import ctypes
 import datetime
+import json
 import os
 import sys
 import tkinter as tk
@@ -55,9 +56,10 @@ class LibraryShiftApp(tk.Tk):
 
         # 确定默认排班表路径：
         # 1) 优先加载同目录下非示例的真实排班表（含“排班”字样且非“示例排班表.xlsx”，方便放在 exe 同目录自动生效）
-        # 2) 若没有外部真实表，加载同目录下的 示例排班表.xlsx，或 exe 内置打包的默认示例排班表
-        # 3) 若仍未找到，再兜底扫描同目录/工作目录下的其他 .xlsx
+        # 2) 若同目录没有，读取上次用户通过右上角【📂 导入真实排班表(.xlsx)】选过且仍存在的表（避免重启退回假名示例表）
+        # 3) 若仍没有外部真实表，加载同目录或 exe 内置打包的 示例排班表.xlsx
         base_dir = get_app_dir()
+        state_path = os.path.join(base_dir, "schedule_state.json")
         bundle_dir = getattr(sys, "_MEIPASS", None)
         excel_path = ""
 
@@ -72,15 +74,32 @@ class LibraryShiftApp(tk.Tk):
                 p for p in base_xlsx
                 if "排班" in os.path.basename(p) and os.path.basename(p) != default_excel
             )
-            local_default = os.path.join(base_dir, default_excel)
-            if os.path.exists(local_default):
-                candidates.append(local_default)
         else:
             base_xlsx = []
 
+        if os.path.exists(state_path):
+            try:
+                saved_data = json.load(open(state_path, "r", encoding="utf-8"))
+                saved_excel = str(saved_data.get("excel_path") or "").strip()
+                if (
+                    saved_excel
+                    and "_MEI" not in saved_excel
+                    and os.path.basename(saved_excel) != default_excel
+                    and os.path.exists(saved_excel)
+                    and saved_excel not in candidates
+                ):
+                    candidates.append(saved_excel)
+            except Exception:
+                pass
+
+        if os.path.isdir(base_dir):
+            local_default = os.path.join(base_dir, default_excel)
+            if os.path.exists(local_default) and local_default not in candidates:
+                candidates.append(local_default)
+
         if bundle_dir and os.path.isdir(bundle_dir):
             bundled_default = os.path.join(bundle_dir, default_excel)
-            if os.path.exists(bundled_default):
+            if os.path.exists(bundled_default) and bundled_default not in candidates:
                 candidates.append(bundled_default)
 
         candidates.extend(p for p in base_xlsx if p not in candidates)
@@ -95,7 +114,7 @@ class LibraryShiftApp(tk.Tk):
 
         self.schedule_mgr = ScheduleManager(
             excel_path=excel_path,
-            state_path=os.path.join(base_dir, "schedule_state.json"),
+            state_path=state_path,
         )
         self.parser = ShiftMessageParser(
             schedule_mgr=self.schedule_mgr,
@@ -263,10 +282,12 @@ class LibraryShiftApp(tk.Tk):
 
         tk.Button(
             file_btn_box,
-            text="📂 加载排班表(.xlsx)",
-            font=("Microsoft YaHei UI", 8),
-            bg="#334155",
-            fg="#E2E8F0",
+            text="📂 导入真实排班表(.xlsx)",
+            font=("Microsoft YaHei UI", 8, "bold"),
+            bg="#0284C7",
+            fg="#FFFFFF",
+            activebackground="#0369A1",
+            activeforeground="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
@@ -1082,16 +1103,26 @@ class LibraryShiftApp(tk.Tk):
     # ------------------------------------------------------------------
     # 底部状态栏
     # ------------------------------------------------------------------
+    def _format_excel_status(self) -> Tuple[str, str]:
+        fname = os.path.basename(self.schedule_mgr.excel_path)
+        if fname == "示例排班表.xlsx":
+            return (
+                "⚠️ 当前为【脱敏示例排班表】(张三/助理09等假名) — 请把真实排班表.xlsx放到同文件夹，或点右上角【📂 导入真实排班表(.xlsx)】！",
+                "#B45309",
+            )
+        return (f"📄 当前排班文件: {fname} ({self.schedule_mgr.week_title})", "#334155")
+
     def _build_status_bar(self) -> None:
         bar = tk.Frame(self, bg="#E2E8F0", padx=12, pady=4)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
+        st_txt, st_fg = self._format_excel_status()
         self.status_bar_label = tk.Label(
             bar,
-            text=f"📄 当前排班文件: {os.path.basename(self.schedule_mgr.excel_path)} ({self.schedule_mgr.week_title})",
-            font=("Microsoft YaHei UI", 8),
+            text=st_txt,
+            font=("Microsoft YaHei UI", 8, "bold" if st_fg != "#334155" else "normal"),
             bg="#E2E8F0",
-            fg="#334155",
+            fg=st_fg,
         )
         self.status_bar_label.pack(side=tk.LEFT)
 
@@ -1116,8 +1147,11 @@ class LibraryShiftApp(tk.Tk):
                 self.schedule_mgr.sync_dates_to_current_week(use_realtime=True)
             self._build_matrix_grid()
             self._refresh_all_views()
+            st_txt, st_fg = self._format_excel_status()
             self.status_bar_label.configure(
-                text=f"📄 当前排班文件: {os.path.basename(self.schedule_mgr.excel_path)} ({self.schedule_mgr.week_title})"
+                text=st_txt,
+                fg=st_fg,
+                font=("Microsoft YaHei UI", 8, "bold" if st_fg != "#334155" else "normal"),
             )
 
         wd = WEEKDAYS[now.weekday()]
@@ -1134,8 +1168,11 @@ class LibraryShiftApp(tk.Tk):
         self.schedule_mgr.save_state()
         self._build_matrix_grid()
         self._refresh_all_views()
+        st_txt, st_fg = self._format_excel_status()
         self.status_bar_label.configure(
-            text=f"📄 当前排班文件: {os.path.basename(self.schedule_mgr.excel_path)} ({self.schedule_mgr.week_title})"
+            text=st_txt,
+            fg=st_fg,
+            font=("Microsoft YaHei UI", 8, "bold" if st_fg != "#334155" else "normal"),
         )
 
     # ------------------------------------------------------------------
@@ -1623,8 +1660,11 @@ class LibraryShiftApp(tk.Tk):
         self.operator_combo.configure(values=self.schedule_mgr.all_names)
         self._build_matrix_grid()
         self._refresh_all_views()
+        st_txt, st_fg = self._format_excel_status()
         self.status_bar_label.configure(
-            text=f"📄 当前排班文件: {os.path.basename(self.schedule_mgr.excel_path)} ({self.schedule_mgr.week_title})"
+            text=st_txt,
+            fg=st_fg,
+            font=("Microsoft YaHei UI", 8, "bold" if st_fg != "#334155" else "normal"),
         )
         self._append_log(f"📂 已重新加载排班表：{os.path.basename(path)} ({self.schedule_mgr.week_title})", "INFO")
 
