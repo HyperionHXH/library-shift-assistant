@@ -852,19 +852,33 @@ class WeChatMonitor:
         if self._stealth_orig_exstyle is None or self._stealth_hwnd != target:
             self._stealth_orig_exstyle = user32.GetWindowLongW(target, GWL_EXSTYLE)
 
+        was_iconic = bool(user32.IsIconic(target))
+        if user32.GetForegroundWindow() == target:
+            shell_hwnd = ctypes.windll.user32.GetShellWindow() if hasattr(ctypes.windll.user32, "GetShellWindow") else 0
+            if shell_hwnd:
+                user32.SetForegroundWindow(shell_hwnd)
+
         new_ex = self._stealth_orig_exstyle | WS_EX_LAYERED | WS_EX_TRANSPARENT
         user32.SetWindowLongW(target, GWL_EXSTYLE, new_ex)
         user32.SetLayeredWindowAttributes(target, 0, 1, LWA_ALPHA)
-        if user32.IsIconic(target):
+        if was_iconic:
             user32.ShowWindow(target, SW_SHOWNOACTIVATE)
         user32.SetWindowPos(
             target, HWND_BOTTOM, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
+        # 若从最小化恢复，给 Qt/Win32 窗口 0.2s 完成首帧重绘，并校验 DWM 是否可抓到有效画面
+        time.sleep(0.20 if was_iconic else 0.06)
         self.target_hwnd = target
         self._stealth_hwnd = target
         self.stealth_active = True
         self._stealth_just_hidden_ts = time.time()
+
+        probe_img, _, probe_mode = capture_window_image(target)
+        if probe_img is None:
+            self.restore_stealth_window(bring_front=False)
+            return False, f"当前微信窗口在透明隐身状态下未能渲染画面 ({probe_mode})，已自动还原；建议改用【保持窗口在后台被其他窗口遮挡】模式"
+
         return True, "已将微信转入【后台隐身挂机】（完全透明不挡屏、可点击穿透，监控持续读消息；点击任务栏微信图标或停止监控可随时恢复）"
 
     def restore_stealth_window(self, bring_front: bool = False) -> Tuple[bool, str]:

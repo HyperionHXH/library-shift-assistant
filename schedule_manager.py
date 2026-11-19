@@ -578,26 +578,35 @@ class ScheduleManager:
         return None
 
     def get_post_time_rows(self, post: str) -> List[Tuple[str, int, int, str]]:
-        """获取指定岗位在排班表中实际存在的所有去重时段行（例如服务台无20:00-22:00，书库含20-22与20-23两班岗）"""
+        """获取单个岗位在排班表中实际存在的所有去重时段行"""
+        return self.get_group_time_rows([post])
+
+    def get_group_time_rows(self, posts: List[str]) -> List[Tuple[str, int, int, str]]:
+        """获取一组岗位（如合并后的 [2楼书库, 3楼书库, 4楼书库]）实际存在的去重时段行"""
         desc_map = {t: desc for t, _, _, desc in STANDARD_TIME_SLOTS}
+        post_set = set(posts)
         found: Dict[str, Tuple[int, int]] = {}
         for s in self.slots.values():
-            if s.post == post and s.time_str not in found:
+            if s.post in post_set and s.time_str not in found:
                 found[s.time_str] = (s.start_min, s.end_min)
+
+        is_desk = (post_set == {"服务台"})
+        is_d5 = (post_set == {"D5图书室"})
+        is_stack = any("书库" in p for p in posts)
 
         rows: List[Tuple[str, int, int, str]] = []
         for t_str, (st, ed) in found.items():
             desc = desc_map.get(t_str, "")
             if not desc:
-                if post == "D5图书室":
+                if is_d5:
                     desc = "D5弹性1小时"
                 elif st >= 0:
-                    desc = post
-            elif post == "服务台":
+                    desc = "、".join(posts)
+            elif is_desk:
                 desc = desc.replace(" (服务台)", "").replace(" (20-23点)", "")
                 if t_str == "20:00-23:00":
                     desc = "晚班闭馆 (服务台无20-22)"
-            elif "书库" in post:
+            elif is_stack:
                 desc = desc.replace(" (书库)", "").replace("/仅书库", "")
                 if t_str == "18:00-20:00":
                     desc = "晚班一节 (双人岗)"

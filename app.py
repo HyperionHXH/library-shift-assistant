@@ -108,7 +108,12 @@ class LibraryShiftApp(tk.Tk):
         )
 
         self.wx_windows: List[WeChatWindowInfo] = []
-        self.post_order: List[str] = ["服务台", "2楼书库", "3楼书库", "4楼书库", "D5图书室"]
+        self.matrix_groups: List[Tuple[str, List[str]]] = [
+            ("服务台", ["服务台"]),
+            ("书库", ["2楼书库", "3楼书库", "4楼书库"]),
+            ("D5图书室", ["D5图书室"]),
+        ]
+        self.matrix_group_map: Dict[str, List[str]] = dict(self.matrix_groups)
         self.post_tab_frames: Dict[str, tk.Frame] = {}
         self.matrix_buttons: Dict[Tuple[str, str, str], tk.Label] = {}
         self._last_date_iso: str = datetime.date.today().isoformat()
@@ -437,7 +442,7 @@ class LibraryShiftApp(tk.Tk):
 
         tk.Label(
             header_row,
-            text="🗓️ 分岗位独立筛选图（服务台/各书库/D5拆开独立设置；20-22与20-23为独立两班岗）",
+            text="🗓️ 分类型排班筛选图（服务台 / 书库(2·3·4楼合并) / D5图书室 独立设置；20-22与20-23为独立两班岗）",
             font=("Microsoft YaHei UI", 9, "bold"),
             bg="#FFFFFF",
             fg="#111827",
@@ -475,7 +480,7 @@ class LibraryShiftApp(tk.Tk):
         self._build_matrix_grid()
 
     def _build_matrix_grid(self) -> None:
-        """按岗位（服务台 / 2楼书库 / 3楼书库 / 4楼书库 / D5图书室）拆开构建独立课表筛选矩阵"""
+        """按【服务台 / 书库(2·3·4楼合并) / D5图书室】三大类型拆开构建独立课表筛选矩阵"""
         for tab_id in self.post_matrix_notebook.tabs():
             self.post_matrix_notebook.forget(tab_id)
         for fr in self.post_tab_frames.values():
@@ -483,27 +488,25 @@ class LibraryShiftApp(tk.Tk):
         self.post_tab_frames.clear()
         self.matrix_buttons.clear()
 
-        post_notes = {
+        group_notes = {
             "服务台": "服务台独立班表（含早班 08:00 起及晚班 20:00-23:00；注意：服务台无 20:00-22:00 班次，禁用此处不影响书库）",
-            "2楼书库": "2楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
-            "3楼书库": "3楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
-            "4楼书库": "4楼书库独立班表（20:00-22:00 与 20:00-23:00 为两班独立岗位，互不牵连；禁用此处不影响其他楼层及服务台）",
+            "书库": "书库统一班表（同时控制 2/3/4 楼书库；20:00-22:00 与 20:00-23:00 为独立两班岗互不牵连，禁用此处不影响服务台；若仅禁特定楼层可在左侧取消勾选）",
             "D5图书室": "D5图书室独立班表（仅含 上午 / 晚上 弹性班次，无 20:00-22:00 等固定钟点班）",
         }
         today_iso = datetime.date.today().isoformat()
 
-        for post in self.post_order:
+        for g_key, posts in self.matrix_groups:
             tab_fr = tk.Frame(self.post_matrix_notebook, bg="#FFFFFF", padx=6, pady=6)
-            self.post_matrix_notebook.add(tab_fr, text=f" {post} ")
-            self.post_tab_frames[post] = tab_fr
+            self.post_matrix_notebook.add(tab_fr, text=f" {g_key} ")
+            self.post_tab_frames[g_key] = tab_fr
 
-            # 顶部说明与本岗快捷操作栏
+            # 顶部说明与本组快捷操作栏
             bar = tk.Frame(tab_fr, bg="#F8FAFC", padx=8, pady=5)
             bar.pack(fill=tk.X, pady=(0, 6))
 
             tk.Label(
                 bar,
-                text=post_notes.get(post, f"{post}独立班表"),
+                text=group_notes.get(g_key, f"{g_key}独立班表"),
                 font=("Microsoft YaHei UI", 8),
                 bg="#F8FAFC",
                 fg="#475569",
@@ -511,18 +514,13 @@ class LibraryShiftApp(tk.Tk):
             ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
             act_cfg = {"font": ("Microsoft YaHei UI", 8), "relief": tk.GROOVE, "padx": 6, "pady": 2, "cursor": "hand2"}
-            if "书库" in post:
-                tk.Button(
-                    bar, text="📋 同步本楼层禁用到2/3/4楼书库", bg="#EEF2FF", fg="#3730A3",
-                    command=lambda p=post: self._copy_bookstack_blocks(p), **act_cfg
-                ).pack(side=tk.RIGHT, padx=(4, 0))
             tk.Button(
-                bar, text="✅ 本岗全开", bg="#DCFCE7", fg="#166534",
-                command=lambda p=post: self._set_post_all_blocked(p, False), **act_cfg
+                bar, text="✅ 本表全开", bg="#DCFCE7", fg="#166534",
+                command=lambda g=g_key: self._set_group_all_blocked(g, False), **act_cfg
             ).pack(side=tk.RIGHT, padx=(4, 0))
             tk.Button(
-                bar, text="🚫 本岗全禁", bg="#FEE2E2", fg="#991B1B",
-                command=lambda p=post: self._set_post_all_blocked(p, True), **act_cfg
+                bar, text="🚫 本表全禁", bg="#FEE2E2", fg="#991B1B",
+                command=lambda g=g_key: self._set_group_all_blocked(g, True), **act_cfg
             ).pack(side=tk.RIGHT, padx=(4, 0))
 
             canvas_frame = tk.Frame(tab_fr, bg="#FFFFFF")
@@ -536,10 +534,18 @@ class LibraryShiftApp(tk.Tk):
             canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-            # 表头
+            def _bind_wheel(cv):
+                def _on_mw(ev):
+                    cv.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+                cv.bind("<Enter>", lambda _e: cv.bind_all("<MouseWheel>", _on_mw))
+                cv.bind("<Leave>", lambda _e: cv.unbind_all("<MouseWheel>"))
+
+            _bind_wheel(canvas)
+
+            col_title = "书库(2·3·4楼)" if g_key == "书库" else g_key
             tk.Label(
                 inner,
-                text=f"{post} \\ 星期\n(点击列头整天切本岗)",
+                text=f"{col_title} \\ 星期\n(点击列头整天切本表)",
                 font=("Microsoft YaHei UI", 8, "bold"),
                 bg="#334155",
                 fg="#FFFFFF",
@@ -563,11 +569,10 @@ class LibraryShiftApp(tk.Tk):
                     cursor="hand2",
                 )
                 lbl.grid(row=0, column=c_idx, padx=1, pady=1, sticky="nsew")
-                lbl.bind("<Button-1>", lambda _e, p=post, w=wd: self._toggle_entire_weekday(p, w))
+                lbl.bind("<Button-1>", lambda _e, g=g_key, w=wd: self._toggle_entire_weekday(g, w))
 
-            # 仅列出该岗位在排班表里真实存在的时段行
-            post_rows = self.schedule_mgr.get_post_time_rows(post)
-            for r_idx, (t_str, _s_min, _e_min, desc) in enumerate(post_rows, start=1):
+            group_rows = self.schedule_mgr.get_group_time_rows(posts)
+            for r_idx, (t_str, _s_min, _e_min, desc) in enumerate(group_rows, start=1):
                 row_hdr = tk.Label(
                     inner,
                     text=f"{t_str}\n{desc}",
@@ -579,11 +584,11 @@ class LibraryShiftApp(tk.Tk):
                     cursor="hand2",
                 )
                 row_hdr.grid(row=r_idx, column=0, padx=1, pady=1, sticky="nsew")
-                row_hdr.bind("<Button-1>", lambda _e, p=post, ts=t_str: self._toggle_entire_timeslot_row(p, ts))
+                row_hdr.bind("<Button-1>", lambda _e, g=g_key, ts=t_str: self._toggle_entire_timeslot_row(g, ts))
 
                 for c_idx, wd in enumerate(WEEKDAYS, start=1):
-                    sid = f"{post}|{wd}|{t_str}"
-                    if sid not in self.schedule_mgr.slots:
+                    has_any = any(f"{p}|{wd}|{t_str}" in self.schedule_mgr.slots for p in posts)
+                    if not has_any:
                         empty_lbl = tk.Label(
                             inner,
                             text="—",
@@ -607,8 +612,8 @@ class LibraryShiftApp(tk.Tk):
                         cursor="hand2",
                     )
                     cell.grid(row=r_idx, column=c_idx, padx=1, pady=1, sticky="nsew")
-                    cell.bind("<Button-1>", lambda _e, p=post, w=wd, ts=t_str: self._on_matrix_cell_clicked(p, w, ts))
-                    self.matrix_buttons[(post, wd, t_str)] = cell
+                    cell.bind("<Button-1>", lambda _e, g=g_key, w=wd, ts=t_str: self._on_matrix_cell_clicked(g, w, ts))
+                    self.matrix_buttons[(g_key, wd, t_str)] = cell
 
     # ------------------------------------------------------------------
     # Tab 2: 全馆分岗位排班总表与手动替班
@@ -1192,131 +1197,120 @@ class LibraryShiftApp(tk.Tk):
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _on_matrix_cell_clicked(self, post: str, weekday: str, time_str: str) -> None:
-        """点击某岗位的排班格子，仅切换该岗位该时段（post|weekday|time_str）的可接/不可接状态"""
-        sid = f"{post}|{weekday}|{time_str}"
-        slot = self.schedule_mgr.slots.get(sid)
-        if not slot:
+    def _on_matrix_cell_clicked(self, group_key: str, weekday: str, time_str: str) -> None:
+        """点击某类型课表的格子，切换该组内所有岗位(如 2/3/4楼书库 或 服务台 或 D5)在该时段的可接状态"""
+        posts = self.matrix_group_map.get(group_key, [group_key])
+        group_slots = [
+            self.schedule_mgr.slots[f"{p}|{weekday}|{time_str}"]
+            for p in posts
+            if f"{p}|{weekday}|{time_str}" in self.schedule_mgr.slots
+        ]
+        if not group_slots:
             return
 
         op = self.schedule_mgr.operator_name.strip()
         if op:
-            if slot.has_holder(op):
-                is_sub = not slot.was_originally_held_by(op)
-                if is_sub:
+            owned = [s for s in group_slots if s.has_holder(op)]
+            if owned:
+                s0 = owned[0]
+                if not s0.was_originally_held_by(op):
                     messagebox.showinfo(
                         "已替班接下",
-                        f"您已替班接下【{post} {weekday} {slot.time_str}】！\n"
+                        f"您已替班接下【{s0.post} {weekday} {s0.time_str}】！\n"
                         f"如需退回/撤销，请前往第 4 选项卡【替班记录】选中后点击撤销。",
                     )
                 else:
                     messagebox.showinfo(
                         "本人原固定班次",
-                        f"【{post} {weekday} {slot.time_str}】是您本人的原固定班次。",
+                        f"【{s0.post} {weekday} {s0.time_str}】是您本人的原固定班次。",
                     )
                 return
 
-            conflict = self.schedule_mgr.is_time_window_conflicting_with_existing(op, weekday, slot.start_min, slot.end_min)
+            ref = group_slots[0]
+            conflict = self.schedule_mgr.is_time_window_conflicting_with_existing(op, weekday, ref.start_min, ref.end_min)
             if conflict:
                 messagebox.showwarning(
                     "已有班次冲突",
                     f"您在【{weekday} {conflict.time_str}】已有【{conflict.post}】的班次！\n"
-                    f"时间重叠无法同时接【{post} {slot.time_str}】，系统已自动锁定排除。",
+                    f"时间重叠无法同时接【{group_key} {ref.time_str}】，系统已自动锁定排除。",
                 )
                 return
 
-        if post not in self.schedule_mgr.allowed_posts:
+        enabled_posts = [p for p in posts if p in self.schedule_mgr.allowed_posts]
+        if not enabled_posts:
             if messagebox.askyesno(
-                "岗位当前被整体禁用",
-                f"您当前在左侧取消勾选了【{post}】整个岗位，因此该岗位所有班次都不可接。\n是否立即重新启用【{post}】岗位并开放此班次？",
+                "当前岗位均被整体禁用",
+                f"您在左侧取消勾选了【{'/'.join(posts)}】，因此该表所有班次均不可接。\n是否立即重新勾选启用并开放此班次？",
             ):
-                self.post_vars[post].set(True)
-                self.schedule_mgr.allowed_posts.add(post)
-                self.schedule_mgr.blocked_slot_ids.discard(sid)
+                for p in posts:
+                    if p in self.post_vars:
+                        self.post_vars[p].set(True)
+                    self.schedule_mgr.allowed_posts.add(p)
+                    self.schedule_mgr.blocked_slot_ids.discard(f"{p}|{weekday}|{time_str}")
                 self.schedule_mgr.save_state()
                 self._refresh_all_views()
             return
 
-        # 严格按单个 slot_id 切换禁接状态（书库与服务台完全独立，20-22 与 20-23 完全独立）
-        legacy_key = f"{weekday}|{time_str}"
-        self.schedule_mgr.blocked_time_keys.discard(legacy_key)
-        if sid in self.schedule_mgr.blocked_slot_ids:
-            self.schedule_mgr.blocked_slot_ids.remove(sid)
-        else:
-            self.schedule_mgr.blocked_slot_ids.add(sid)
+        # 严格按本组(服务台 / 书库 / D5)的精确 slot_id 切换，绝不牵连另一组，也不牵连 20-22 与 20-23
+        self.schedule_mgr.blocked_time_keys.discard(f"{weekday}|{time_str}")
+        target_slots = [s for s in group_slots if s.post in enabled_posts]
+        any_open = any(s.slot_id not in self.schedule_mgr.blocked_slot_ids for s in target_slots)
+        for s in group_slots:
+            if any_open:
+                self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
+            else:
+                self.schedule_mgr.blocked_slot_ids.discard(s.slot_id)
 
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _toggle_entire_weekday(self, post: str, weekday: str) -> None:
-        """点击某岗位某天列头，仅整列切换该岗位在该天的所有时段"""
+    def _toggle_entire_weekday(self, group_key: str, weekday: str) -> None:
+        """点击某分表列头，仅整列切换该分表在该天的所有时段"""
+        posts = set(self.matrix_group_map.get(group_key, [group_key]))
         day_sids = [
             s.slot_id for s in self.schedule_mgr.slots.values()
-            if s.post == post and s.weekday == weekday
+            if s.post in posts and s.weekday == weekday
         ]
         if not day_sids:
             return
         any_unblocked = any(sid not in self.schedule_mgr.blocked_slot_ids for sid in day_sids)
-        if any_unblocked:
-            for sid in day_sids:
+        for sid in day_sids:
+            if any_unblocked:
                 self.schedule_mgr.blocked_slot_ids.add(sid)
-        else:
-            for sid in day_sids:
+            else:
                 self.schedule_mgr.blocked_slot_ids.discard(sid)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _toggle_entire_timeslot_row(self, post: str, time_str: str) -> None:
-        """点击某岗位左侧时段行标题，仅整行切换该岗位在周一至周日该时段的禁接状态"""
+    def _toggle_entire_timeslot_row(self, group_key: str, time_str: str) -> None:
+        """点击某分表左侧时段行标题，仅整行切换该分表在周一至周日该时段的禁接状态"""
+        posts = set(self.matrix_group_map.get(group_key, [group_key]))
         row_sids = [
             s.slot_id for s in self.schedule_mgr.slots.values()
-            if s.post == post and s.time_str == time_str
+            if s.post in posts and s.time_str == time_str
         ]
         if not row_sids:
             return
         any_unblocked = any(sid not in self.schedule_mgr.blocked_slot_ids for sid in row_sids)
-        if any_unblocked:
-            for sid in row_sids:
+        for sid in row_sids:
+            if any_unblocked:
                 self.schedule_mgr.blocked_slot_ids.add(sid)
-        else:
-            for sid in row_sids:
+            else:
                 self.schedule_mgr.blocked_slot_ids.discard(sid)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
 
-    def _set_post_all_blocked(self, post: str, block: bool) -> None:
-        """快速将单个岗位的全部具体班次设为禁接或开放"""
+    def _set_group_all_blocked(self, group_key: str, block: bool) -> None:
+        """快速将该分表（服务台 / 书库 / D5）的全部班次设为禁接或开放"""
+        posts = set(self.matrix_group_map.get(group_key, [group_key]))
         for s in self.schedule_mgr.slots.values():
-            if s.post == post:
+            if s.post in posts:
                 if block:
                     self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
                 else:
                     self.schedule_mgr.blocked_slot_ids.discard(s.slot_id)
         self.schedule_mgr.save_state()
         self._refresh_all_views()
-
-    def _copy_bookstack_blocks(self, src_post: str) -> None:
-        """将当前楼层书库(如 2楼书库)的手动禁接矩阵复制到其他两个书库楼层(不影响服务台)"""
-        bookstacks = ["2楼书库", "3楼书库", "4楼书库"]
-        if src_post not in bookstacks:
-            return
-        blocked_wd_time = {
-            (s.weekday, s.time_str)
-            for s in self.schedule_mgr.slots.values()
-            if s.post == src_post and s.slot_id in self.schedule_mgr.blocked_slot_ids
-        }
-        for dst_post in bookstacks:
-            if dst_post == src_post:
-                continue
-            for s in self.schedule_mgr.slots.values():
-                if s.post == dst_post:
-                    if (s.weekday, s.time_str) in blocked_wd_time:
-                        self.schedule_mgr.blocked_slot_ids.add(s.slot_id)
-                    else:
-                        self.schedule_mgr.blocked_slot_ids.discard(s.slot_id)
-        self.schedule_mgr.save_state()
-        self._refresh_all_views()
-        messagebox.showinfo("同步完成", f"已将【{src_post}】的禁接设置同步到 2楼/3楼/4楼书库（未影响服务台）。")
 
     def _batch_block_slots(self, predicate) -> None:
         """按精准条件批量将具体班次槽位加入 blocked_slot_ids"""
@@ -1336,7 +1330,7 @@ class LibraryShiftApp(tk.Tk):
         self._refresh_all_views()
 
     def _refresh_all_views(self) -> None:
-        """刷新个人班表、分岗位全周矩阵、全馆排班表、替班历史与顶部统计"""
+        """刷新个人班表、分类型(服务台/书库/D5)筛选矩阵、全馆排班表、替班历史与顶部统计"""
         op = self.schedule_mgr.operator_name.strip()
 
         # 1. 刷新个人班次列表（原班次蓝色、替班新接紫色高亮）
@@ -1357,48 +1351,72 @@ class LibraryShiftApp(tk.Tk):
                 tags=("ORIG" if is_orig else "NEW_SUB",),
             )
 
-        # 2. 刷新分岗位独立筛选矩阵与子选项卡计数标题
-        post_stats = {p: {"avail": 0, "owned": 0, "sub": 0} for p in self.post_order}
-        for (post, wd, t_str), lbl in self.matrix_buttons.items():
-            sid = f"{post}|{wd}|{t_str}"
-            slot = self.schedule_mgr.slots.get(sid)
-            if not slot:
+        # 2. 刷新【服务台 / 书库(2·3·4楼) / D5图书室】独立筛选矩阵与计数徽标
+        group_stats = {g: {"avail": 0, "owned": 0, "sub": 0} for g, _ in self.matrix_groups}
+        for (g_key, wd, t_str), lbl in self.matrix_buttons.items():
+            posts = self.matrix_group_map.get(g_key, [g_key])
+            group_slots = [
+                self.schedule_mgr.slots[f"{p}|{wd}|{t_str}"]
+                for p in posts
+                if f"{p}|{wd}|{t_str}" in self.schedule_mgr.slots
+            ]
+            if not group_slots:
                 continue
 
-            st, _ = self.schedule_mgr.evaluate_slot_status(slot, op, check_expired=False)
-            if st == "OWNED":
-                is_orig = slot.was_originally_held_by(op)
-                if is_orig:
-                    post_stats[post]["owned"] += 1
-                    lbl.configure(text="🟦 原班", bg="#DBEAFE", fg="#1E40AF")
+            owned_here = [s for s in group_slots if op and s.has_holder(op)]
+            if owned_here:
+                sub_here = [s for s in owned_here if not s.was_originally_held_by(op)]
+                if sub_here:
+                    group_stats[g_key]["sub"] += len(sub_here)
+                    hint = f"({sub_here[0].post[:2]})" if len(posts) > 1 else ""
+                    lbl.configure(text=f"🟪 替接{hint}", bg="#EDE9FE", fg="#5B21B6")
                 else:
-                    post_stats[post]["sub"] += 1
-                    lbl.configure(text="🟪 替接", bg="#EDE9FE", fg="#5B21B6")
-            elif st == "CONFLICT":
-                c_slot = self.schedule_mgr.is_time_window_conflicting_with_existing(op, wd, slot.start_min, slot.end_min)
-                c_hint = f"{c_slot.post[:3]} {c_slot.time_str}" if c_slot else "时段重叠"
+                    group_stats[g_key]["owned"] += len(owned_here)
+                    hint = f"({owned_here[0].post[:2]})" if len(posts) > 1 else ""
+                    lbl.configure(text=f"🟦 原班{hint}", bg="#DBEAFE", fg="#1E40AF")
+                continue
+
+            ref = group_slots[0]
+            c_slot = self.schedule_mgr.is_time_window_conflicting_with_existing(op, wd, ref.start_min, ref.end_min) if op else None
+            if c_slot:
+                c_hint = f"{c_slot.post[:3]} {c_slot.time_str}"
                 lbl.configure(text=f"🟧 冲突\n({c_hint})", bg="#FEF3C7", fg="#92400E")
-            elif st == "BLOCKED_POST":
+                continue
+
+            enabled_slots = [s for s in group_slots if s.post in self.schedule_mgr.allowed_posts]
+            if not enabled_slots:
                 lbl.configure(text="🟥 岗位已禁", bg="#FEE2E2", fg="#991B1B")
-            elif st in ("BLOCKED_SLOT", "BLOCKED_TIME"):
+                continue
+
+            avail_slots = [
+                s for s in enabled_slots
+                if self.schedule_mgr.evaluate_slot_status(s, op, check_expired=False)[0] == "AVAILABLE"
+            ]
+            if not avail_slots:
                 lbl.configure(text="🟥 不能接", bg="#FEE2E2", fg="#991B1B")
             else:
-                post_stats[post]["avail"] += 1
-                txt = "🟩 可接(2人)" if len(slot.current_holders) >= 2 else "🟩 可接"
-                lbl.configure(text=txt, bg="#DCFCE7", fg="#166534")
+                group_stats[g_key]["avail"] += len(avail_slots)
+                if len(posts) > 1 and len(avail_slots) < len(group_slots):
+                    fls = ",".join(s.post.replace("楼书库", "") for s in avail_slots)
+                    lbl.configure(text=f"🟩 可({fls}楼)", bg="#DCFCE7", fg="#166534")
+                elif len(avail_slots[0].current_holders) >= 2:
+                    lbl.configure(text="🟩 可接(2人)", bg="#DCFCE7", fg="#166534")
+                else:
+                    lbl.configure(text="🟩 可接", bg="#DCFCE7", fg="#166534")
 
-        post_icons = {"服务台": "🛎️", "2楼书库": "📚", "3楼书库": "📚", "4楼书库": "📚", "D5图书室": "📖"}
-        for post, tab_fr in self.post_tab_frames.items():
-            st_p = post_stats[post]
-            if post not in self.schedule_mgr.allowed_posts:
+        group_titles = {"服务台": "🛎️ 服务台", "书库": "📚 书库(2·3·4楼)", "D5图书室": "📖 D5图书室"}
+        for g_key, posts in self.matrix_groups:
+            tab_fr = self.post_tab_frames[g_key]
+            st_g = group_stats[g_key]
+            if not any(p in self.schedule_mgr.allowed_posts for p in posts):
                 badge = "已禁岗"
             else:
                 parts = []
-                if st_p["owned"] or st_p["sub"]:
-                    parts.append(f"原{st_p['owned'] + st_p['sub']}")
-                parts.append(f"可{st_p['avail']}")
+                if st_g["owned"] or st_g["sub"]:
+                    parts.append(f"原{st_g['owned'] + st_g['sub']}")
+                parts.append(f"可{st_g['avail']}")
                 badge = "/".join(parts)
-            self.post_matrix_notebook.tab(tab_fr, text=f" {post_icons.get(post, '')} {post} ({badge}) ")
+            self.post_matrix_notebook.tab(tab_fr, text=f" {group_titles.get(g_key, g_key)} ({badge}) ")
 
         # 3. 刷新全馆排班总表
         self._refresh_all_shifts_table()
